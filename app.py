@@ -66,67 +66,52 @@ mapping = {
 }
 
 # =========================================================
-# ---------------- APP 1 : DER JSON CREATOR ----------------
-# =========================================================
-def clean_sql_query(file):
-    content = file.read().decode("utf-8")
-    content = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
-    content = re.sub(r"--.*?$", "", content, flags=re.MULTILINE)
-    return re.sub(r"\s+", " ", content).strip()
-
-def create_final_json(uploaded_files):
-    metrics = []
-    for idx, uploaded_file in enumerate(uploaded_files, start=1):
-        cleaned_query = clean_sql_query(uploaded_file)
-        metrics.append({
-            "id": idx, "metric": f"DER_{uploaded_file.name}", "level": "l2",
-            "supported_customers": {
-                "included": [],
-                "excluded": ["kaiser-staging","kpphm-prod","kpphmi-prod","kpphmi-staging","kpwa-prod","kpwa-staging","jhah-prod"]
-            },
-            "queries": {
-                "snowflake": {"database": "DAP","schema": "L2","query": cleaned_query},
-                "postgres": {"database": "postgres","schema": "l2","query": cleaned_query}
-            }
-        })
-    return {"metrics": metrics}
-
-# =========================================================
-# -------- CONTACT VALIDITY (STREAMING VERSION) -----------
+# -------- CONTACT VALIDITY (ROBUST VERSION) --------------
 # =========================================================
 CATEGORY_CONFIG = {
-    "Total": "", "With Contact": "_patients_with_contact_number",
-    "With Email": "_patients_with_email", "Only Contact": "_patients_with_only_contact",
-    "Only Email": "_patients_with_only_email", "Both Contact and Email": "_patients_with_both_contact_and_email",
+    "Total": "", 
+    "With Contact": "_patients_with_contact_number",
+    "With Email": "_patients_with_email", 
+    "Only Contact": "_patients_with_only_contact",
+    "Only Email": "_patients_with_only_email", 
+    "Both Contact and Email": "_patients_with_both_contact_and_email",
     "None Available": "_patients_with_neither_contact_nor_email"
 }
 
 def process_single_file_to_long(f):
-    """Processes one file and immediately transforms it to save RAM."""
-    df = pd.read_csv(f).fillna(0)
+    """Processes one file into long format, supporting ANY metric prefix."""
+    try:
+        df = pd.read_csv(f).fillna(0)
+    except Exception:
+        return pd.DataFrame()
+
+    # Identify all numeric columns (the 'metrics')
+    numeric_cols = df.select_dtypes(include="number").columns.tolist()
+    suffixes = [v for v in CATEGORY_CONFIG.values() if v != ""]
     
-    # Identify key columns
-    den_cols = [c for c in df.columns if c.startswith("den_")]
-    num_cols = [c for c in df.columns if c.startswith("num_") and not any(suffix in c for suffix in CATEGORY_CONFIG.values() if suffix != "")]
+    # A column is a "Base Metric" if it's numeric and NOT a breakdown suffix column
+    base_metrics = [c for c in numeric_cols if not any(c.endswith(s) for s in suffixes)]
     
     chunk_results = []
     for category, suffix in CATEGORY_CONFIG.items():
         temp = pd.DataFrame({"customer": df["customer"], "Category": category})
-        for den in den_cols:
-            temp[den] = df[den] if category == "Total" else 0
-        for num in num_cols:
-            src = num + suffix if suffix else num
-            temp[num] = df[src] if src in df.columns else 0
+        for metric in base_metrics:
+            if category == "Total":
+                temp[metric] = df[metric]
+            else:
+                # Look for the breakdown column (e.g. Metric_patients_with_email)
+                src_col = metric + suffix
+                temp[metric] = df[src_col] if src_col in df.columns else 0
         chunk_results.append(temp)
     
     return pd.concat(chunk_results, ignore_index=True)
 
 # =========================================================
-# ---------------- APP 2 : DER ZIP COMPILER ----------------
+# ---------------- APP LOGIC ------------------------------
 # =========================================================
 if app_choice == "DER ZIP Data Compiler":
-
-    mode = st.selectbox("Select processing mode", ["Aggregated (Customer level)", "Use this for more than 2 columns", "Contact Validity Compilation"])
+    mode = st.selectbox("Select processing mode", 
+                        ["Contact Validity Compilation", "Aggregated (Customer level)", "Use this for more than 2 columns"])
     uploaded_files = st.file_uploader("Upload CSV files", type=["csv"], accept_multiple_files=True)
 
     if uploaded_files:
@@ -134,21 +119,16 @@ if app_choice == "DER ZIP Data Compiler":
             all_chunks = []
             progress_bar = st.progress(0)
             
-            # Process files one by one (The "Streaming" way)
             for i, f in enumerate(uploaded_files):
-                try:
-                    processed_chunk = process_single_file_to_long(f)
+                processed_chunk = process_single_file_to_long(f)
+                if not processed_chunk.empty:
                     all_chunks.append(processed_chunk)
-                    
-                    # Every 10 files, consolidate memory to prevent crash
-                    if len(all_chunks) >= 10:
-                        combined = pd.concat(all_chunks, ignore_index=True)
-                        # Summing up common customer/category rows
-                        all_chunks = [combined.groupby(["customer", "Category"], as_index=False).sum()]
-                        gc.collect() 
-                        
-                except Exception as e:
-                    st.error(f"Error in {f.name}: {e}")
+                
+                # Consolidate memory every 10 files
+                if len(all_chunks) >= 10:
+                    combined = pd.concat(all_chunks, ignore_index=True)
+                    all_chunks = [combined.groupby(["customer", "Category"], as_index=False).sum()]
+                    gc.collect() 
                 
                 progress_bar.progress((i + 1) / len(uploaded_files))
 
@@ -156,44 +136,31 @@ if app_choice == "DER ZIP Data Compiler":
                 final_df = pd.concat(all_chunks, ignore_index=True)
                 final_df = final_df.groupby(["customer", "Category"], as_index=False).sum()
                 
-                # Add Health System Name
+                # Map Health Systems
                 final_df.insert(1, "Health System Name", final_df["customer"].map(mapping).fillna(""))
                 
-                # Reorder columns (Logic remains identical)
+                # Reorder: ID columns first, then Metrics sorted alphabetically
                 fixed_cols = ["customer", "Health System Name", "Category"]
-                den_cols = sorted([c for c in final_df.columns if c.startswith("den_")])
-                num_cols = sorted([c for c in final_df.columns if c.startswith("num_")])
+                metric_cols = sorted([c for c in final_df.columns if c not in fixed_cols])
+                final_df = final_df[fixed_cols + metric_cols]
                 
-                ordered_metrics = []
-                for den in den_cols:
-                    suffix = den.replace("den_", "")
-                    num = f"num_{suffix}"
-                    ordered_metrics.append(den)
-                    if num in num_cols: ordered_metrics.append(num)
-
-                final_df = final_df[fixed_cols + ordered_metrics]
-                
-                st.success("Processing complete!")
+                st.success(f"Successfully processed {len(uploaded_files)} files!")
                 st.dataframe(final_df, use_container_width=True)
 
                 st.download_button(
-                    "⬇️ Download Final CSV",
+                    "⬇️ Download Compiled CSV",
                     final_df.to_csv(index=False),
-                    "final_contact_validity.csv",
+                    "compiled_contact_validity.csv",
                     "text/csv"
                 )
-                
+
         elif mode == "Aggregated (Customer level)":
-            # Streaming aggregation for mode 1
             master_df = None
             for f in uploaded_files:
                 df_temp = pd.read_csv(f)
                 numeric_cols = df_temp.select_dtypes(include="number").columns
                 chunk = df_temp.groupby("customer", as_index=False)[numeric_cols].sum()
-                if master_df is None:
-                    master_df = chunk
-                else:
-                    master_df = pd.concat([master_df, chunk]).groupby("customer", as_index=False).sum()
+                master_df = chunk if master_df is None else pd.concat([master_df, chunk]).groupby("customer", as_index=False).sum()
                 gc.collect()
             
             master_df.insert(1, "Health System Name", master_df["customer"].map(mapping).fillna(""))
@@ -204,6 +171,7 @@ if app_choice == "DER ZIP Data Compiler":
             df.insert(1, "Health System Name", df["customer"].map(mapping).fillna(""))
             st.dataframe(df, use_container_width=True)
 
+
 # =========================================================
 # ---------------- APP 1 UI -------------------------------
 # =========================================================
@@ -213,3 +181,4 @@ if app_choice == "DER JSON Creator":
         final_json = create_final_json(uploaded_files)
         st.json(final_json)
         st.download_button("⬇️ Download JSON", json.dumps(final_json, indent=4), "DER_JSON_FINAL.json", "application/json")
+
