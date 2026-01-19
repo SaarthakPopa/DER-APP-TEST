@@ -66,45 +66,58 @@ mapping = {
 }
 
 # =========================================================
-# -------- CONTACT VALIDITY (ROBUST VERSION) --------------
+# -------- CONTACT VALIDITY CONFIG & LOGIC ----------------
 # =========================================================
+# Updated categories and order per user request
+CATEGORY_ORDER = [
+    "Total", 
+    "With Telephone", 
+    "With Email", 
+    "With only Telephone", 
+    "With only Email", 
+    "With Both Telephone and Email", 
+    "None"
+]
+
 CATEGORY_CONFIG = {
     "Total": "", 
-    "With Contact": "_patients_with_contact_number",
+    "With Telephone": "_patients_with_contact_number",
     "With Email": "_patients_with_email", 
-    "Only Contact": "_patients_with_only_contact",
-    "Only Email": "_patients_with_only_email", 
-    "Both Contact and Email": "_patients_with_both_contact_and_email",
-    "None Available": "_patients_with_neither_contact_nor_email"
+    "With only Telephone": "_patients_with_only_contact",
+    "With only Email": "_patients_with_only_email", 
+    "Both Telephone and Email": "_patients_with_both_contact_and_email",
+    "None": "_patients_with_neither_contact_nor_email"
 }
 
 def process_single_file_to_long(f):
-    """Processes one file into long format, supporting ANY metric prefix."""
+    """Processes file into long format and returns (df, dict_of_metrics_found)."""
     try:
         df = pd.read_csv(f).fillna(0)
     except Exception:
-        return pd.DataFrame()
+        return pd.DataFrame(), []
 
-    # Identify all numeric columns (the 'metrics')
     numeric_cols = df.select_dtypes(include="number").columns.tolist()
     suffixes = [v for v in CATEGORY_CONFIG.values() if v != ""]
-    
-    # A column is a "Base Metric" if it's numeric and NOT a breakdown suffix column
     base_metrics = [c for c in numeric_cols if not any(c.endswith(s) for s in suffixes)]
     
+    # Extract DER number from filename for sorting
+    der_match = re.search(r"DER_(\d+)", f.name)
+    der_num = int(der_match.group(1)) if der_match else 9999
+    metric_num_map = {m: der_num for m in base_metrics}
+
     chunk_results = []
-    for category, suffix in CATEGORY_CONFIG.items():
+    for category in CATEGORY_ORDER:
+        suffix = CATEGORY_CONFIG[category]
         temp = pd.DataFrame({"customer": df["customer"], "Category": category})
         for metric in base_metrics:
             if category == "Total":
                 temp[metric] = df[metric]
             else:
-                # Look for the breakdown column (e.g. Metric_patients_with_email)
                 src_col = metric + suffix
                 temp[metric] = df[src_col] if src_col in df.columns else 0
         chunk_results.append(temp)
     
-    return pd.concat(chunk_results, ignore_index=True)
+    return pd.concat(chunk_results, ignore_index=True), metric_num_map
 
 # =========================================================
 # ---------------- APP LOGIC ------------------------------
@@ -117,14 +130,15 @@ if app_choice == "DER ZIP Data Compiler":
     if uploaded_files:
         if mode == "Contact Validity Compilation":
             all_chunks = []
+            master_metric_map = {}
             progress_bar = st.progress(0)
             
             for i, f in enumerate(uploaded_files):
-                processed_chunk = process_single_file_to_long(f)
+                processed_chunk, file_metrics = process_single_file_to_long(f)
                 if not processed_chunk.empty:
                     all_chunks.append(processed_chunk)
+                    master_metric_map.update(file_metrics)
                 
-                # Consolidate memory every 10 files
                 if len(all_chunks) >= 10:
                     combined = pd.concat(all_chunks, ignore_index=True)
                     all_chunks = [combined.groupby(["customer", "Category"], as_index=False).sum()]
@@ -136,13 +150,21 @@ if app_choice == "DER ZIP Data Compiler":
                 final_df = pd.concat(all_chunks, ignore_index=True)
                 final_df = final_df.groupby(["customer", "Category"], as_index=False).sum()
                 
-                # Map Health Systems
+                # Apply Health System Name
                 final_df.insert(1, "Health System Name", final_df["customer"].map(mapping).fillna(""))
                 
-                # Reorder: ID columns first, then Metrics sorted alphabetically
-                fixed_cols = ["customer", "Health System Name", "Category"]
-                metric_cols = sorted([c for c in final_df.columns if c not in fixed_cols])
-                final_df = final_df[fixed_cols + metric_cols]
+                # Apply Category Sort Order
+                final_df["Category"] = pd.Categorical(final_df["Category"], categories=CATEGORY_ORDER, ordered=True)
+                final_df = final_df.sort_values(["customer", "Category"])
+
+                # Handle Column Sorting by DER Number
+                id_cols = ["customer", "Health System Name", "Category"]
+                metrics_in_df = [c for c in final_df.columns if c not in id_cols]
+                
+                # Sort metrics: Primary by DER number, Secondary alphabetically
+                sorted_metrics = sorted(metrics_in_df, key=lambda x: (master_metric_map.get(x, 9999), x))
+                
+                final_df = final_df[id_cols + sorted_metrics]
                 
                 st.success(f"Successfully processed {len(uploaded_files)} files!")
                 st.dataframe(final_df, use_container_width=True)
@@ -153,6 +175,8 @@ if app_choice == "DER ZIP Data Compiler":
                     "compiled_contact_validity.csv",
                     "text/csv"
                 )
+
+       
 
         elif mode == "Aggregated (Customer level)":
             master_df = None
@@ -181,4 +205,5 @@ if app_choice == "DER JSON Creator":
         final_json = create_final_json(uploaded_files)
         st.json(final_json)
         st.download_button("⬇️ Download JSON", json.dumps(final_json, indent=4), "DER_JSON_FINAL.json", "application/json")
+
 
