@@ -61,7 +61,7 @@ mapping = {
     'uninet-prod': 'CHI Health Partners', 'usrc-prod': 'US RenalCare',
     'walgreens-prod': 'Walgreens', 'champion-prod' : 'Champion Health Plan',
     'mdxhawaii-prod' : 'MDX Hawaii', 'recuro-prod' : 'Recuro Health',
-    'mhpartner-prod' : 'Mission Health Partners'
+    'mhpartner-prod' : 'Mission Health Partners', 'dock-olyortho-prod' : 'Oly Ortho (Nexus)'
 }
 
 # =========================================================
@@ -205,6 +205,7 @@ if app_choice == "DER JSON Creator":
         final_json = create_final_json(uploaded_files)
         st.json(final_json)
         st.download_button("⬇️ Download JSON", json.dumps(final_json, indent=4), "DER_JSON_FINAL.json", "application/json")
+
 
 
 
