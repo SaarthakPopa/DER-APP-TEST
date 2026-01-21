@@ -67,15 +67,23 @@ mapping = {
 # =========================================================
 # ---------------- CONFIG FOR ORDERING --------------------
 # =========================================================
+# Order of rows (Top to Bottom)
 CATEGORY_ORDER = ["Total", "With Telephone", "With Email", "With only Telephone", "With only Email", "With Both Telephone and Email", "None"]
+
+# Suffix mapping based on your CSV structure
 CATEGORY_CONFIG = {
-    "Total": "_patients_total", "With Telephone": "_patients_with_contact_number", "With Email": "_patients_with_email", 
-    "With only Telephone": "_patients_with_only_contact", "With only Email": "_patients_with_only_email", 
-    "With Both Telephone and Email": "_patients_with_both_contact_and_email", "None": "_patients_with_neither_contact_nor_email"
+    "Total": "_patients_total", 
+    "With Telephone": "_patients_with_contact_number", 
+    "With Email": "_patients_with_email", 
+    "With only Telephone": "_patients_with_only_contact", 
+    "With only Email": "_patients_with_only_email", 
+    "With Both Telephone and Email": "_patients_with_both_contact_and_email", 
+    "None": "_patients_with_neither_contact_nor_email"
 }
 
-# EXACT REQUESTED VACCINATION ORDER
+# Order of Vaccine Columns (Left to Right)
 VACCINE_ORDER_PATTERNS = [
+    "total_attributed_lives", "age_16", "age_50", "age_analysis", # General stats first
     "hpv_9_17", "shingles_50_59", "shingles_60_64", "shingles_65_plus",
     "rsv_covid_60_64", "rsv_covid_65_74", "rsv_covid_75_plus",
     "pneumococcal_50_plus", "pneumococcal_50_64", "pneumococcal_65_plus",
@@ -88,10 +96,9 @@ VACCINE_ORDER_PATTERNS = [
 ]
 
 def get_vaccine_sort_key(col_name):
-    """Sorts columns: ID columns first, then Vaccines in order, Denominator before Numerator."""
+    """Sorts columns: Common stats first, then Vaccines in order, Denominator before Numerator."""
     col_lower = col_name.lower()
     
-    # Identify vaccine pattern rank
     for index, pattern in enumerate(VACCINE_ORDER_PATTERNS):
         if pattern in col_lower:
             # Denominator (den_ or a_b_den) gets 0, Numerator (num_ or count_ or b_num) gets 1
@@ -106,22 +113,76 @@ def get_vaccine_sort_key(col_name):
 def process_single_file_to_long(f):
     try:
         df = pd.read_csv(f).fillna(0)
-    except: return pd.DataFrame()
+    except: 
+        return pd.DataFrame()
 
-    numeric_cols = df.select_dtypes(include="number").columns.tolist()
-    suffixes = [v for v in CATEGORY_CONFIG.values() if v != ""]
-    base_metrics = [c for c in numeric_cols if not any(c.endswith(s) for s in suffixes)]
+    total_suffix = CATEGORY_CONFIG["Total"]
+    contact_suffixes = [v for k, v in CATEGORY_CONFIG.items() if k != "Total"]
+    
+    # Identify prefixes by looking for columns ending with the 'Total' suffix
+    base_metrics = [c.replace(total_suffix, "") for c in df.columns if c.endswith(total_suffix)]
+    
+    # Robust fallback for different CSV naming conventions
+    if not base_metrics:
+        numeric_cols = df.select_dtypes(include="number").columns.tolist()
+        base_metrics = [c for c in numeric_cols if not any(c.endswith(s) for s in contact_suffixes)]
     
     chunk_results = []
     for category in CATEGORY_ORDER:
         suffix = CATEGORY_CONFIG[category]
+        # In the "Total" case for older files, the suffix might be empty in the config
+        # We handle that by checking if suffix is in the config
+        actual_suffix = suffix if category != "Total" else total_suffix
+        
         temp = pd.DataFrame({"customer": df["customer"], "Category": category})
         for metric in base_metrics:
-            src_col = metric if category == "Total" else metric + suffix
-            temp[metric] = df[src_col] if src_col in df.columns else 0
+            # Try matching prefix + category suffix
+            src_col = metric + actual_suffix
+            
+            if src_col in df.columns:
+                temp[metric] = df[src_col]
+            elif category == "Total" and metric in df.columns:
+                # Fallback for files where the total column is just the metric name
+                temp[metric] = df[metric]
+            else:
+                temp[metric] = 0
         chunk_results.append(temp)
+        
     return pd.concat(chunk_results, ignore_index=True)
 
+# =========================================================
+# ---------------- APP LOGIC UPDATE -----------------------
+# =========================================================
+# Inside the "Contact Validity Compilation" block, ensures vaccine column sorting:
+if uploaded_files:
+    if mode == "Contact Validity Compilation":
+        all_chunks = []
+        for f in uploaded_files:
+            processed_chunk = process_single_file_to_long(f)
+            if not processed_chunk.empty:
+                all_chunks.append(processed_chunk)
+        
+        if all_chunks:
+            # Sum up values across different files for the same customer/category
+            final_df = pd.concat(all_chunks, ignore_index=True).groupby(["customer", "Category"], as_index=False).sum()
+            
+            # 1. Map Health Systems
+            final_df.insert(1, "Health System Name", final_df["customer"].map(mapping).fillna(""))
+            
+            # 2. Sort Rows (Category Order)
+            final_df["Category"] = pd.Categorical(final_df["Category"], categories=CATEGORY_ORDER, ordered=True)
+            final_df = final_df.sort_values(["customer", "Category"])
+
+            # 3. Sort Columns (Vaccine Order + Denominator Priority)
+            id_cols = ["customer", "Health System Name", "Category"]
+            metric_cols = [c for c in final_df.columns if c not in id_cols]
+            sorted_metrics = sorted(metric_cols, key=get_vaccine_sort_key)
+            
+            final_df = final_df[id_cols + sorted_metrics]
+            
+            st.success("Compiled with correct Category calculations and Vaccine Ordering.")
+            st.dataframe(final_df, use_container_width=True)
+            st.download_button("⬇️ Download CSV", final_df.to_csv(index=False), "compiled_vaccine_contact_data.csv")
 # =========================================================
 # ---------------- APP LOGIC ------------------------------
 # =========================================================
@@ -189,5 +250,6 @@ elif app_choice == "DER JSON Creator":
         final_json = create_final_json(uploaded_files)
         st.json(final_json)
         st.download_button("⬇️ Download JSON", json.dumps(final_json, indent=4), "DER_JSON_FINAL.json", "application/json")
+
 
 
