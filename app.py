@@ -65,148 +65,123 @@ mapping = {
 }
 
 # =========================================================
-# -------- CONTACT VALIDITY CONFIG & LOGIC ----------------
+# ---------------- CONFIG FOR ORDERING --------------------
 # =========================================================
-CATEGORY_ORDER = [
-    "Total", 
-    "With Telephone", 
-    "With Email", 
-    "With only Telephone", 
-    "With only Email", 
-    "With Both Telephone and Email", 
-    "None"
-]
-
+CATEGORY_ORDER = ["Total", "With Telephone", "With Email", "With only Telephone", "With only Email", "With Both Telephone and Email", "None"]
 CATEGORY_CONFIG = {
-    "Total": "", 
-    "With Telephone": "_patients_with_contact_number",
-    "With Email": "_patients_with_email", 
-    "With only Telephone": "_patients_with_only_contact",
-    "With only Email": "_patients_with_only_email", 
-    "With Both Telephone and Email": "_patients_with_both_contact_and_email",
-    "None": "_patients_with_neither_contact_nor_email"
+    "Total": "", "With Telephone": "_patients_with_contact_number", "With Email": "_patients_with_email", 
+    "With only Telephone": "_patients_with_only_contact", "With only Email": "_patients_with_only_email", 
+    "With Both Telephone and Email": "_patients_with_both_contact_and_email", "None": "_patients_with_neither_contact_nor_email"
 }
 
+# EXACT REQUESTED VACCINATION ORDER
+VACCINE_ORDER_PATTERNS = [
+    "hpv_9_17", "shingles_50_59", "shingles_60_64", "shingles_65_plus",
+    "rsv_covid_60_64", "rsv_covid_65_74", "rsv_covid_75_plus",
+    "pneumococcal_50_plus", "pneumococcal_50_64", "pneumococcal_65_plus",
+    "influenza_50_plus", "covid_65_plus", "rsv_60_plus",
+    "men_b_acwy_abcwy_16_18", "men_b_acwy_abcwy_19_23",
+    "men_acwy_abcwy_16_18", "men_acwy_abcwy_19_23",
+    "men_b_16_18", "men_b_19_23", "men_acwy_16_18", "men_acwy_19_23",
+    "men_abcwy_16_18", "men_abcwy_19_23", "paxlovid",
+    "shingles_actual", "shingles_ls", "men_acwy_actual", "men_b_actual", "men_b_ls"
+]
+
+def get_vaccine_sort_key(col_name):
+    """Sorts columns: ID columns first, then Vaccines in order, Denominator before Numerator."""
+    col_lower = col_name.lower()
+    
+    # Identify vaccine pattern rank
+    for index, pattern in enumerate(VACCINE_ORDER_PATTERNS):
+        if pattern in col_lower:
+            # Denominator (den_ or a_b_den) gets 0, Numerator (num_ or count_ or b_num) gets 1
+            is_den = 0 if (col_lower.startswith("den_") or "a_b_den" in col_lower) else 1
+            return (index, is_den, col_name)
+    
+    return (999, 0, col_name)
+
+# =========================================================
+# ---------------- PROCESSING LOGIC -----------------------
+# =========================================================
 def process_single_file_to_long(f):
-    """Processes file into long format and tracks metric source for sorting."""
     try:
         df = pd.read_csv(f).fillna(0)
-    except Exception:
-        return pd.DataFrame(), {}
+    except: return pd.DataFrame()
 
     numeric_cols = df.select_dtypes(include="number").columns.tolist()
     suffixes = [v for v in CATEGORY_CONFIG.values() if v != ""]
     base_metrics = [c for c in numeric_cols if not any(c.endswith(s) for s in suffixes)]
     
-    # Extract DER number from filename (e.g., DER_42 -> 42)
-    der_match = re.search(r"DER_(\d+)", f.name)
-    der_num = int(der_match.group(1)) if der_match else 9999
-    
-    metric_num_map = {m: der_num for m in base_metrics}
-
     chunk_results = []
     for category in CATEGORY_ORDER:
         suffix = CATEGORY_CONFIG[category]
         temp = pd.DataFrame({"customer": df["customer"], "Category": category})
         for metric in base_metrics:
-            if category == "Total":
-                temp[metric] = df[metric]
-            else:
-                src_col = metric + suffix
-                temp[metric] = df[src_col] if src_col in df.columns else 0
+            src_col = metric if category == "Total" else metric + suffix
+            temp[metric] = df[src_col] if src_col in df.columns else 0
         chunk_results.append(temp)
-    
-    return pd.concat(chunk_results, ignore_index=True), metric_num_map
-
-# =========================================================
-# ---------------- JSON CREATOR LOGIC ---------------------
-# =========================================================
-def create_final_json(uploaded_files):
-    """Placeholder logic for JSON creator based on SQL files."""
-    results = []
-    for f in uploaded_files:
-        content = f.read().decode("utf-8")
-        # Extract metadata via regex if needed
-        results.append({"filename": f.name, "size": len(content)})
-    return results
+    return pd.concat(chunk_results, ignore_index=True)
 
 # =========================================================
 # ---------------- APP LOGIC ------------------------------
 # =========================================================
 if app_choice == "DER ZIP Data Compiler":
-    mode = st.selectbox("Select processing mode", 
-                        ["Contact Validity Compilation", "Aggregated (Customer level)", "Use this for more than 2 columns"])
+    mode = st.selectbox("Select processing mode", ["Contact Validity Compilation", "Aggregated (Customer level)", "Use this for more than 2 columns"])
     uploaded_files = st.file_uploader("Upload CSV files", type=["csv"], accept_multiple_files=True)
 
     if uploaded_files:
         if mode == "Contact Validity Compilation":
             all_chunks = []
-            master_metric_map = {}
-            progress_bar = st.progress(0)
-            
-            for i, f in enumerate(uploaded_files):
-                processed_chunk, file_metrics = process_single_file_to_long(f)
+            for f in uploaded_files:
+                processed_chunk = process_single_file_to_long(f)
                 if not processed_chunk.empty:
                     all_chunks.append(processed_chunk)
-                    master_metric_map.update(file_metrics)
-                
-                # Consolidate memory every 10 files
-                if len(all_chunks) >= 10:
-                    combined = pd.concat(all_chunks, ignore_index=True)
-                    all_chunks = [combined.groupby(["customer", "Category"], as_index=False).sum()]
-                    gc.collect() 
-                
-                progress_bar.progress((i + 1) / len(uploaded_files))
-
+            
             if all_chunks:
-                final_df = pd.concat(all_chunks, ignore_index=True)
-                final_df = final_df.groupby(["customer", "Category"], as_index=False).sum()
+                final_df = pd.concat(all_chunks, ignore_index=True).groupby(["customer", "Category"], as_index=False).sum()
                 
-                # Add Health System Name
+                # 1. Map Health Systems
                 final_df.insert(1, "Health System Name", final_df["customer"].map(mapping).fillna(""))
                 
-                # Apply Custom Category Sorting
+                # 2. Sort Rows (Category Order)
                 final_df["Category"] = pd.Categorical(final_df["Category"], categories=CATEGORY_ORDER, ordered=True)
                 final_df = final_df.sort_values(["customer", "Category"])
 
-                # Reordering Columns based on DER Number extracted from filenames
+                # 3. Sort Columns (Vaccine Order + Denominator Priority)
                 id_cols = ["customer", "Health System Name", "Category"]
-                metrics_in_df = [c for c in final_df.columns if c not in id_cols]
-                
-                # Sort metrics: smaller DER numbers first
-                sorted_metrics = sorted(metrics_in_df, key=lambda x: (master_metric_map.get(x, 9999), x))
+                metric_cols = [c for c in final_df.columns if c not in id_cols]
+                sorted_metrics = sorted(metric_cols, key=get_vaccine_sort_key)
                 
                 final_df = final_df[id_cols + sorted_metrics]
                 
-                st.success(f"Successfully compiled {len(uploaded_files)} files!")
+                st.success("Compiled with Vaccine Ordering (Left to Right) and Category Ordering (Top to Bottom).")
                 st.dataframe(final_df, use_container_width=True)
-
-                st.download_button(
-                    "⬇️ Download Final CSV",
-                    final_df.to_csv(index=False),
-                    "compiled_contact_validity.csv",
-                    "text/csv"
-                )
+                st.download_button("⬇️ Download CSV", final_df.to_csv(index=False), "compiled_vaccine_contact_data.csv")
 
         elif mode == "Aggregated (Customer level)":
-            master_df = None
-            for f in uploaded_files:
-                df_temp = pd.read_csv(f)
-                numeric_cols = df_temp.select_dtypes(include="number").columns
-                chunk = df_temp.groupby("customer", as_index=False)[numeric_cols].sum()
-                if master_df is None:
-                    master_df = chunk
-                else:
-                    master_df = pd.concat([master_df, chunk]).groupby("customer", as_index=False).sum()
-            
+            # (Standard aggregation logic)
+            master_df = pd.concat([pd.read_csv(f) for f in uploaded_files])
+            nums = master_df.select_dtypes(include="number").columns
+            master_df = master_df.groupby("customer", as_index=False)[nums].sum()
             master_df.insert(1, "Health System Name", master_df["customer"].map(mapping).fillna(""))
-            st.dataframe(master_df, use_container_width=True)
+            st.dataframe(master_df)
 
         elif mode == "Use this for more than 2 columns":
-            df = pd.concat((pd.read_csv(f) for f in uploaded_files), ignore_index=True)
-            if "customer" in df.columns:
-                df.insert(1, "Health System Name", df["customer"].map(mapping).fillna(""))
-            st.dataframe(df, use_container_width=True)
+            # Perform Outer Merge
+            dfs = [pd.read_csv(f) for f in uploaded_files]
+            final_df = dfs[0]
+            for i in range(1, len(dfs)):
+                common = [c for c in final_df.columns if c in dfs[i].columns and not any(p in c for p in ["den_", "num_", "count_"])]
+                final_df = pd.merge(final_df, dfs[i], on=common, how='outer')
+            
+            # Apply same vaccine sorting
+            id_cols = [c for c in ["customer", "prid", "prnm", "plid", "plnm"] if c in final_df.columns]
+            metric_cols = [c for c in final_df.columns if c not in id_cols]
+            sorted_metrics = sorted(metric_cols, key=get_vaccine_sort_key)
+            final_df = final_df[id_cols + sorted_metrics]
+            final_df.insert(1, "Health System Name", final_df["customer"].map(mapping).fillna(""))
+            st.dataframe(final_df)
+
 
 elif app_choice == "DER JSON Creator":
     uploaded_files = st.file_uploader("Upload SQL files", type=["sql"], accept_multiple_files=True)
@@ -214,3 +189,4 @@ elif app_choice == "DER JSON Creator":
         final_json = create_final_json(uploaded_files)
         st.json(final_json)
         st.download_button("⬇️ Download JSON", json.dumps(final_json, indent=4), "DER_JSON_FINAL.json", "application/json")
+
