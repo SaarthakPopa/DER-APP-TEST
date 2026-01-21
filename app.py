@@ -69,7 +69,7 @@ mapping = {
 # =========================================================
 CATEGORY_ORDER = ["Total", "With Telephone", "With Email", "With only Telephone", "With only Email", "With Both Telephone and Email", "None"]
 CATEGORY_CONFIG = {
-    "Total": "", "With Telephone": "_patients_with_contact_number", "With Email": "_patients_with_email", 
+    "Total": "_patients_total", "With Telephone": "_patients_with_contact_number", "With Email": "_patients_with_email", 
     "With only Telephone": "_patients_with_only_contact", "With only Email": "_patients_with_only_email", 
     "With Both Telephone and Email": "_patients_with_both_contact_and_email", "None": "_patients_with_neither_contact_nor_email"
 }
@@ -189,4 +189,5 @@ elif app_choice == "DER JSON Creator":
         final_json = create_final_json(uploaded_files)
         st.json(final_json)
         st.download_button("⬇️ Download JSON", json.dumps(final_json, indent=4), "DER_JSON_FINAL.json", "application/json")
+
 
