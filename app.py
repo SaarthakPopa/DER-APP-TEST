@@ -77,7 +77,6 @@ CATEGORY_ORDER = [
     "None"
 ]
 
-# Keys here MUST match CATEGORY_ORDER exactly
 CATEGORY_CONFIG = {
     "Total": "", 
     "With Telephone": "_patients_with_contact_number",
@@ -120,6 +119,18 @@ def process_single_file_to_long(f):
     return pd.concat(chunk_results, ignore_index=True), metric_num_map
 
 # =========================================================
+# ---------------- JSON CREATOR LOGIC ---------------------
+# =========================================================
+def create_final_json(uploaded_files):
+    """Placeholder logic for JSON creator based on SQL files."""
+    results = []
+    for f in uploaded_files:
+        content = f.read().decode("utf-8")
+        # Extract metadata via regex if needed
+        results.append({"filename": f.name, "size": len(content)})
+    return results
+
+# =========================================================
 # ---------------- APP LOGIC ------------------------------
 # =========================================================
 if app_choice == "DER ZIP Data Compiler":
@@ -149,7 +160,6 @@ if app_choice == "DER ZIP Data Compiler":
 
             if all_chunks:
                 final_df = pd.concat(all_chunks, ignore_index=True)
-                # Ensure summing doesn't break Categorical logic
                 final_df = final_df.groupby(["customer", "Category"], as_index=False).sum()
                 
                 # Add Health System Name
@@ -159,11 +169,11 @@ if app_choice == "DER ZIP Data Compiler":
                 final_df["Category"] = pd.Categorical(final_df["Category"], categories=CATEGORY_ORDER, ordered=True)
                 final_df = final_df.sort_values(["customer", "Category"])
 
-                # Handle Column Sorting (ID Columns -> Metrics sorted by DER Number)
+                # Reordering Columns based on DER Number extracted from filenames
                 id_cols = ["customer", "Health System Name", "Category"]
                 metrics_in_df = [c for c in final_df.columns if c not in id_cols]
                 
-                # Sort metrics based on the number we extracted from the filenames
+                # Sort metrics: smaller DER numbers first
                 sorted_metrics = sorted(metrics_in_df, key=lambda x: (master_metric_map.get(x, 9999), x))
                 
                 final_df = final_df[id_cols + sorted_metrics]
@@ -179,33 +189,28 @@ if app_choice == "DER ZIP Data Compiler":
                 )
 
         elif mode == "Aggregated (Customer level)":
-            # Simplified aggregation for other modes
             master_df = None
             for f in uploaded_files:
                 df_temp = pd.read_csv(f)
                 numeric_cols = df_temp.select_dtypes(include="number").columns
                 chunk = df_temp.groupby("customer", as_index=False)[numeric_cols].sum()
-                master_df = chunk if master_df is None else pd.concat([master_df, chunk]).groupby("customer", as_index=False).sum()
+                if master_df is None:
+                    master_df = chunk
+                else:
+                    master_df = pd.concat([master_df, chunk]).groupby("customer", as_index=False).sum()
             
             master_df.insert(1, "Health System Name", master_df["customer"].map(mapping).fillna(""))
             st.dataframe(master_df, use_container_width=True)
 
         elif mode == "Use this for more than 2 columns":
             df = pd.concat((pd.read_csv(f) for f in uploaded_files), ignore_index=True)
-            df.insert(1, "Health System Name", df["customer"].map(mapping).fillna(""))
+            if "customer" in df.columns:
+                df.insert(1, "Health System Name", df["customer"].map(mapping).fillna(""))
             st.dataframe(df, use_container_width=True)
 
-
-# =========================================================
-# ---------------- APP 1 UI -------------------------------
-# =========================================================
-if app_choice == "DER JSON Creator":
+elif app_choice == "DER JSON Creator":
     uploaded_files = st.file_uploader("Upload SQL files", type=["sql"], accept_multiple_files=True)
     if uploaded_files:
         final_json = create_final_json(uploaded_files)
         st.json(final_json)
         st.download_button("⬇️ Download JSON", json.dumps(final_json, indent=4), "DER_JSON_FINAL.json", "application/json")
-
-
-
-
