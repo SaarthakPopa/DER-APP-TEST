@@ -10,9 +10,13 @@ import gc
 st.set_page_config(page_title="LifeSciences DER Automation Tool", layout="wide")
 st.title("🧬 LifeSciences DER Automation Tool")
 
+# Sidebar for global settings
+st.sidebar.header("Global Settings")
+map_unknown = st.sidebar.checkbox("Show 'Unknown' for missing mappings", value=True)
+
 app_choice = st.selectbox(
     "Choose an operation",
-    ["DER JSON Creator", "DER ZIP Data Compiler"]
+    ["DER ZIP Data Compiler", "DER JSON Creator"]
 )
 
 st.divider()
@@ -20,7 +24,8 @@ st.divider()
 # =========================================================
 # ---------------- HEALTH SYSTEM MAPPING -------------------
 # =========================================================
-mapping = {
+# (Mapping dictionary remains the same as provided)
+MAPPING = {
     'advantasure-prod': 'Advantasure (Env 1)', 'advantasureapollo-prod': 'Advantasure (Env 2)',
     'adventist-prod': 'Adventist Healthcare', 'alameda-prod': 'Alameda County',
     'alo-prod': 'Alo solutions', 'arkansashealth-prod': 'Chi St Vincent',
@@ -67,10 +72,8 @@ mapping = {
 # =========================================================
 # ---------------- CONFIG FOR ORDERING --------------------
 # =========================================================
-# Order of rows (Top to Bottom)
 CATEGORY_ORDER = ["Total", "With Telephone", "With Email", "With only Telephone", "With only Email", "With Both Telephone and Email", "None"]
 
-# Suffix mapping based on your CSV structure
 CATEGORY_CONFIG = {
     "Total": "_patients_total", 
     "With Telephone": "_patients_with_contact_number", 
@@ -81,9 +84,8 @@ CATEGORY_CONFIG = {
     "None": "_patients_with_neither_contact_nor_email"
 }
 
-# Order of Vaccine Columns (Left to Right)
 VACCINE_ORDER_PATTERNS = [
-    "total_attributed_lives", "age_16", "age_50", "age_analysis", # General stats first
+    "total_attributed_lives", "age_16", "age_50", "age_analysis", 
     "hpv_9_17", "shingles_50_59", "shingles_60_64", "shingles_65_plus",
     "rsv_covid_60_64", "rsv_covid_65_74", "rsv_covid_75_plus",
     "pneumococcal_50_plus", "pneumococcal_50_64", "pneumococcal_65_plus",
@@ -95,161 +97,132 @@ VACCINE_ORDER_PATTERNS = [
     "shingles_actual", "shingles_ls", "men_acwy_actual", "men_b_actual", "men_b_ls"
 ]
 
+# =========================================================
+# ---------------- HELPER FUNCTIONS -----------------------
+# =========================================================
+
 def get_vaccine_sort_key(col_name):
-    """Sorts columns: Common stats first, then Vaccines in order, Denominator before Numerator."""
     col_lower = col_name.lower()
-    
     for index, pattern in enumerate(VACCINE_ORDER_PATTERNS):
         if pattern in col_lower:
-            # Denominator (den_ or a_b_den) gets 0, Numerator (num_ or count_ or b_num) gets 1
             is_den = 0 if (col_lower.startswith("den_") or "a_b_den" in col_lower) else 1
             return (index, is_den, col_name)
-    
     return (999, 0, col_name)
 
-# =========================================================
-# ---------------- PROCESSING LOGIC -----------------------
-# =========================================================
 def process_single_file_to_long(f):
+    """Processes CSV into a standardized long format based on CATEGORY_ORDER."""
     try:
         df = pd.read_csv(f).fillna(0)
-    except: 
+    except Exception as e:
+        st.error(f"Error reading {f.name}: {e}")
+        return pd.DataFrame()
+
+    if "customer" not in df.columns:
         return pd.DataFrame()
 
     total_suffix = CATEGORY_CONFIG["Total"]
-    contact_suffixes = [v for k, v in CATEGORY_CONFIG.items() if k != "Total"]
-    
-    # Identify prefixes by looking for columns ending with the 'Total' suffix
+    # Identify the base metric names (e.g., den_hpv_9_17)
     base_metrics = [c.replace(total_suffix, "") for c in df.columns if c.endswith(total_suffix)]
     
-    # Robust fallback for different CSV naming conventions
     if not base_metrics:
-        numeric_cols = df.select_dtypes(include="number").columns.tolist()
-        base_metrics = [c for c in numeric_cols if not any(c.endswith(s) for s in contact_suffixes)]
-    
+        # Fallback for simple count files
+        base_metrics = [c for c in df.select_dtypes(include="number").columns if c != "customer"]
+
     chunk_results = []
     for category in CATEGORY_ORDER:
         suffix = CATEGORY_CONFIG[category]
-        # In the "Total" case for older files, the suffix might be empty in the config
-        # We handle that by checking if suffix is in the config
-        actual_suffix = suffix if category != "Total" else total_suffix
-        
         temp = pd.DataFrame({"customer": df["customer"], "Category": category})
         for metric in base_metrics:
-            # Try matching prefix + category suffix
-            src_col = metric + actual_suffix
-            
+            src_col = metric + suffix
             if src_col in df.columns:
                 temp[metric] = df[src_col]
             elif category == "Total" and metric in df.columns:
-                # Fallback for files where the total column is just the metric name
                 temp[metric] = df[metric]
             else:
                 temp[metric] = 0
         chunk_results.append(temp)
-        
+    
+    del df
     return pd.concat(chunk_results, ignore_index=True)
 
-# =========================================================
-# ---------------- APP LOGIC UPDATE -----------------------
-# =========================================================
-# Inside the "Contact Validity Compilation" block, ensures vaccine column sorting:
-if uploaded_files:
-    if mode == "Contact Validity Compilation":
-        all_chunks = []
-        for f in uploaded_files:
-            processed_chunk = process_single_file_to_long(f)
-            if not processed_chunk.empty:
-                all_chunks.append(processed_chunk)
-        
-        if all_chunks:
-            # Sum up values across different files for the same customer/category
-            final_df = pd.concat(all_chunks, ignore_index=True).groupby(["customer", "Category"], as_index=False).sum()
-            
-            # 1. Map Health Systems
-            final_df.insert(1, "Health System Name", final_df["customer"].map(mapping).fillna(""))
-            
-            # 2. Sort Rows (Category Order)
-            final_df["Category"] = pd.Categorical(final_df["Category"], categories=CATEGORY_ORDER, ordered=True)
-            final_df = final_df.sort_values(["customer", "Category"])
+def extract_metadata_from_sql(sql_content):
+    """Simple parser for SQL file metadata tags."""
+    meta = {}
+    patterns = {
+        "slug": r"--\s*slug:\s*([^\n]+)",
+        "name": r"--\s*name:\s*([^\n]+)",
+        "description": r"--\s*description:\s*([^\n]+)"
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, sql_content, re.IGNORECASE)
+        meta[key] = match.group(1).strip() if match else "N/A"
+    return meta
 
-            # 3. Sort Columns (Vaccine Order + Denominator Priority)
-            id_cols = ["customer", "Health System Name", "Category"]
-            metric_cols = [c for c in final_df.columns if c not in id_cols]
-            sorted_metrics = sorted(metric_cols, key=get_vaccine_sort_key)
-            
-            final_df = final_df[id_cols + sorted_metrics]
-            
-            st.success("Compiled with correct Category calculations and Vaccine Ordering.")
-            st.dataframe(final_df, use_container_width=True)
-            st.download_button("⬇️ Download CSV", final_df.to_csv(index=False), "compiled_vaccine_contact_data.csv")
 # =========================================================
-# ---------------- APP LOGIC ------------------------------
+# ---------------- MAIN APP LOGIC -------------------------
 # =========================================================
+
 if app_choice == "DER ZIP Data Compiler":
-    mode = st.selectbox("Select processing mode", ["Contact Validity Compilation", "Aggregated (Customer level)", "Use this for more than 2 columns"])
+    mode = st.selectbox("Select processing mode", [
+        "Contact Validity Compilation", 
+        "Aggregated (Customer level)", 
+        "Outer Merge (Multi-column Join)"
+    ])
     uploaded_files = st.file_uploader("Upload CSV files", type=["csv"], accept_multiple_files=True)
 
     if uploaded_files:
-        if mode == "Contact Validity Compilation":
-            all_chunks = []
-            for f in uploaded_files:
-                processed_chunk = process_single_file_to_long(f)
-                if not processed_chunk.empty:
-                    all_chunks.append(processed_chunk)
-            
-            if all_chunks:
-                final_df = pd.concat(all_chunks, ignore_index=True).groupby(["customer", "Category"], as_index=False).sum()
+        with st.spinner("Processing files..."):
+            if mode == "Contact Validity Compilation":
+                all_chunks = [process_single_file_to_long(f) for f in uploaded_files]
+                all_chunks = [c for c in all_chunks if not c.empty]
                 
-                # 1. Map Health Systems
-                final_df.insert(1, "Health System Name", final_df["customer"].map(mapping).fillna(""))
+                if all_chunks:
+                    final_df = pd.concat(all_chunks, ignore_index=True).groupby(["customer", "Category"], as_index=False).sum()
+                    final_df.insert(1, "Health System Name", final_df["customer"].map(MAPPING).fillna("Unknown" if map_unknown else ""))
+                    final_df["Category"] = pd.Categorical(final_df["Category"], categories=CATEGORY_ORDER, ordered=True)
+                    final_df = final_df.sort_values(["customer", "Category"])
+                    
+                    id_cols = ["customer", "Health System Name", "Category"]
+                    metric_cols = [c for c in final_df.columns if c not in id_cols]
+                    sorted_metrics = sorted(metric_cols, key=get_vaccine_sort_key)
+                    final_df = final_df[id_cols + sorted_metrics]
+                    
+                    st.success("Data Compiled Successfully")
+                    st.dataframe(final_df, use_container_width=True)
+                    st.download_button("⬇️ Download Compiled CSV", final_df.to_csv(index=False), "compiled_data.csv")
+
+            elif mode == "Aggregated (Customer level)":
+                master_df = pd.concat([pd.read_csv(f) for f in uploaded_files]).fillna(0)
+                numeric_cols = master_df.select_dtypes(include="number").columns
+                master_df = master_df.groupby("customer", as_index=False)[numeric_cols].sum()
+                master_df.insert(1, "Health System Name", master_df["customer"].map(MAPPING).fillna(""))
+                st.dataframe(master_df)
+
+            elif mode == "Outer Merge (Multi-column Join)":
+                dfs = [pd.read_csv(f) for f in uploaded_files]
+                final_df = dfs[0]
+                for next_df in dfs[1:]:
+                    common = [c for c in final_df.columns if c in next_df.columns and c in ["customer", "prid", "plid"]]
+                    final_df = pd.merge(final_df, next_df, on=common, how='outer').fillna(0)
                 
-                # 2. Sort Rows (Category Order)
-                final_df["Category"] = pd.Categorical(final_df["Category"], categories=CATEGORY_ORDER, ordered=True)
-                final_df = final_df.sort_values(["customer", "Category"])
-
-                # 3. Sort Columns (Vaccine Order + Denominator Priority)
-                id_cols = ["customer", "Health System Name", "Category"]
-                metric_cols = [c for c in final_df.columns if c not in id_cols]
-                sorted_metrics = sorted(metric_cols, key=get_vaccine_sort_key)
-                
-                final_df = final_df[id_cols + sorted_metrics]
-                
-                st.success("Compiled with Vaccine Ordering (Left to Right) and Category Ordering (Top to Bottom).")
-                st.dataframe(final_df, use_container_width=True)
-                st.download_button("⬇️ Download CSV", final_df.to_csv(index=False), "compiled_vaccine_contact_data.csv")
-
-        elif mode == "Aggregated (Customer level)":
-            # (Standard aggregation logic)
-            master_df = pd.concat([pd.read_csv(f) for f in uploaded_files])
-            nums = master_df.select_dtypes(include="number").columns
-            master_df = master_df.groupby("customer", as_index=False)[nums].sum()
-            master_df.insert(1, "Health System Name", master_df["customer"].map(mapping).fillna(""))
-            st.dataframe(master_df)
-
-        elif mode == "Use this for more than 2 columns":
-            # Perform Outer Merge
-            dfs = [pd.read_csv(f) for f in uploaded_files]
-            final_df = dfs[0]
-            for i in range(1, len(dfs)):
-                common = [c for c in final_df.columns if c in dfs[i].columns and not any(p in c for p in ["den_", "num_", "count_"])]
-                final_df = pd.merge(final_df, dfs[i], on=common, how='outer')
-            
-            # Apply same vaccine sorting
-            id_cols = [c for c in ["customer", "prid", "prnm", "plid", "plnm"] if c in final_df.columns]
-            metric_cols = [c for c in final_df.columns if c not in id_cols]
-            sorted_metrics = sorted(metric_cols, key=get_vaccine_sort_key)
-            final_df = final_df[id_cols + sorted_metrics]
-            final_df.insert(1, "Health System Name", final_df["customer"].map(mapping).fillna(""))
-            st.dataframe(final_df)
-
+                final_df.insert(1, "Health System Name", final_df["customer"].map(MAPPING).fillna(""))
+                st.dataframe(final_df)
+        
+        gc.collect()
 
 elif app_choice == "DER JSON Creator":
     uploaded_files = st.file_uploader("Upload SQL files", type=["sql"], accept_multiple_files=True)
     if uploaded_files:
-        final_json = create_final_json(uploaded_files)
-        st.json(final_json)
-        st.download_button("⬇️ Download JSON", json.dumps(final_json, indent=4), "DER_JSON_FINAL.json", "application/json")
-
-
-
+        json_output = {"reports": []}
+        for f in uploaded_files:
+            content = f.read().decode("utf-8")
+            meta = extract_metadata_from_sql(content)
+            json_output["reports"].append({
+                "slug": meta["slug"],
+                "name": meta["name"],
+                "description": meta["description"],
+                "query": content
+            })
+        
+        st.json(json_output)
+        st.download_button("⬇️ Download JSON", json.dumps(json_output, indent=4), "DER_Configuration.json")
